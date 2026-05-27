@@ -49,8 +49,18 @@ class ExcelReader:
     """Excel读取器 - 支持xls和xlsx格式"""
     
     @staticmethod
+    def is_na_value(value) -> bool:
+        """判断是否为NA值"""
+        if value is None:
+            return True
+        if isinstance(value, str):
+            if value.strip().upper() in ['#NA', '#N/A', 'NA', 'N/A'] or value.strip() == '':
+                return True
+        return False
+    
+    @staticmethod
     def read_middle_table(file_path: str) -> List[MiddleTableRow]:
-        """读取中间表"""
+        """读取中间表 - 过滤NA值"""
         rows = []
         try:
             wb = openpyxl.load_workbook(file_path, data_only=True)
@@ -78,9 +88,15 @@ class ExcelReader:
                 if not row or row[0] is None:
                     continue
                 
-                # 检查是否含有#NA
-                if any('#NA' in str(cell) if cell else False for cell in row):
-                    logger.warning(f"跳过含有#NA的行")
+                # 检查行中是否有NA值 - 如果有任何NA值，则跳过整行
+                has_na = False
+                for cell in row:
+                    if ExcelReader.is_na_value(cell):
+                        has_na = True
+                        break
+                
+                if has_na:
+                    logger.warning(f"跳过含有NA的行")
                     continue
                 
                 try:
@@ -101,7 +117,10 @@ class ExcelReader:
                         account_name=str(row[account_name_col]).strip() if row[account_name_col] else '',
                         match_word=str(row[match_word_col]).strip() if row[match_word_col] else ''
                     )
-                    rows.append(middle_row)
+                    
+                    # 再次检查关键字段
+                    if middle_row.cert_id and middle_row.account_set and middle_row.account_code:
+                        rows.append(middle_row)
                 except Exception as e:
                     logger.error(f"解析中间表行失败: {e}")
             
@@ -112,37 +131,33 @@ class ExcelReader:
         return rows
     
     @staticmethod
-    def read_valuation_file(file_path: str, match_words: List[str]) -> Tuple[List[ValuationData], bool]:
-        """读取估值表文件"""
+    def read_valuation_file(file_path: str) -> List[ValuationData]:
+        """读取估值表文件 - 仅提取数据，不检查匹配词"""
         data = []
-        found_match_word = False
         
         try:
             if file_path.endswith('.xls'):
                 workbook = xlrd.open_workbook(file_path, encoding_override='utf-8')
                 for sheet in workbook.sheets():
-                    result, found = ExcelReader._extract_from_sheet_xls(sheet, match_words)
+                    result = ExcelReader._extract_from_sheet_xls(sheet)
                     data.extend(result)
-                    found_match_word = found_match_word or found
             else:  # xlsx
                 wb = openpyxl.load_workbook(file_path, data_only=True)
                 for sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
-                    result, found = ExcelReader._extract_from_sheet_xlsx(ws, match_words)
+                    result = ExcelReader._extract_from_sheet_xlsx(ws)
                     data.extend(result)
-                    found_match_word = found_match_word or found
                 wb.close()
         except Exception as e:
             logger.error(f"读取估值文件失败 {file_path}: {e}")
-            return [], False
+            return []
         
-        return data, found_match_word
+        return data
     
     @staticmethod
-    def _extract_from_sheet_xls(sheet, match_words: List[str]) -> Tuple[List[ValuationData], bool]:
+    def _extract_from_sheet_xls(sheet) -> List[ValuationData]:
         """从XLS sheet中提取数据"""
         data = []
-        found_match_word = False
         
         try:
             # 查找虚拟净值列和证件号列
@@ -166,7 +181,7 @@ class ExcelReader:
             
             if virtual_net_value_col is None:
                 logger.warning(f"Sheet {sheet.name}: 未找到虚拟净值列")
-                return data, False
+                return data
             
             # 提取数据
             for row_idx in range(header_row + 1, sheet.nrows):
@@ -174,11 +189,6 @@ class ExcelReader:
                 net_value = str(sheet.cell_value(row_idx, virtual_net_value_col)).strip()
                 
                 if net_value and net_value != 'nan' and cert_id and cert_id != 'nan':
-                    for match_word in match_words:
-                        if match_word in sheet.name:
-                            found_match_word = True
-                            break
-                    
                     data.append(ValuationData(
                         cert_id=cert_id,
                         virtual_net_value=net_value
@@ -186,13 +196,12 @@ class ExcelReader:
         except Exception as e:
             logger.error(f"解析XLS sheet失败: {e}")
         
-        return data, found_match_word
+        return data
     
     @staticmethod
-    def _extract_from_sheet_xlsx(ws, match_words: List[str]) -> Tuple[List[ValuationData], bool]:
+    def _extract_from_sheet_xlsx(ws) -> List[ValuationData]:
         """从XLSX sheet中提取数据"""
         data = []
-        found_match_word = False
         
         try:
             # 查找虚拟净值列和证件号列
@@ -216,7 +225,7 @@ class ExcelReader:
             
             if virtual_net_value_col is None:
                 logger.warning(f"Sheet {ws.title}: 未找到虚拟净值列")
-                return data, False
+                return data
             
             # 提取数据
             for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
@@ -227,11 +236,6 @@ class ExcelReader:
                 net_value = str(row[virtual_net_value_col]).strip() if virtual_net_value_col < len(row) and row[virtual_net_value_col] else ''
                 
                 if net_value and net_value != 'None' and cert_id and cert_id != 'None':
-                    for match_word in match_words:
-                        if match_word in ws.title:
-                            found_match_word = True
-                            break
-                    
                     data.append(ValuationData(
                         cert_id=cert_id,
                         virtual_net_value=net_value
@@ -239,11 +243,11 @@ class ExcelReader:
         except Exception as e:
             logger.error(f"解析XLSX sheet失败: {e}")
         
-        return data, found_match_word
+        return data
     
     @staticmethod
-    def find_matching_file(excel_folder: str, match_word: str, date_formats: List[str]) -> Optional[str]:
-        """查找匹配的估值表文件"""
+    def find_matching_file(excel_folder: str, match_word: str) -> Optional[str]:
+        """查找匹配的估值表文件 - 仅在文件名中查找"""
         excel_files = []
         
         try:
@@ -260,7 +264,7 @@ class ExcelReader:
             if match_word in file_name:
                 return file_path
         
-        # 如果没找到，尝试更灵活的匹配
+        # 如果没找到，尝试不区分大小写的匹配
         for file_path in excel_files:
             file_name = os.path.basename(file_path)
             if match_word.lower() in file_name.lower():
@@ -276,12 +280,10 @@ class DataProcessor:
     @staticmethod
     def match_valuation_data(middle_table: List[MiddleTableRow], 
                             excel_folder: str, 
-                            date_formats: List[str],
                             progress_callback=None) -> Tuple[List[Dict], List[str]]:
         """匹配并处理估值数据"""
         all_data = []
         errors = []
-        matched_match_words = set()
         
         for idx, middle_row in enumerate(middle_table):
             if progress_callback:
@@ -292,26 +294,22 @@ class DataProcessor:
                 errors.append(f"产品 {middle_row.product_name} 没有匹配词")
                 continue
             
-            # 查找对应的估值文件
-            excel_file = ExcelReader.find_matching_file(excel_folder, match_word, date_formats)
+            # 查找对应的估值文件 - 仅在文件名中查找
+            excel_file = ExcelReader.find_matching_file(excel_folder, match_word)
             
             if not excel_file:
-                errors.append(f"未找到匹配词 '{match_word}' 对应的估值表文件")
+                errors.append(f"未找到匹配词 '{match_word}' 对应的估值表文件（在文件名中查找）")
                 continue
             
             # 读取估值文件
-            valuation_data, found_match = ExcelReader.read_valuation_file(excel_file, [match_word])
-            
-            if not found_match:
-                errors.append(f"估值文件 {os.path.basename(excel_file)} 中未找到匹配词 '{match_word}'")
+            valuation_data = ExcelReader.read_valuation_file(excel_file)
             
             if not valuation_data:
                 errors.append(f"从文件 {os.path.basename(excel_file)} 中未提取到数据")
                 continue
             
-            matched_match_words.add(match_word)
-            
             # 匹配证件号
+            found_matching_cert = False
             for data in valuation_data:
                 if data.cert_id == middle_row.cert_id:
                     all_data.append({
@@ -322,6 +320,10 @@ class DataProcessor:
                         'virtual_net_value': data.virtual_net_value,
                         'match_word': match_word
                     })
+                    found_matching_cert = True
+            
+            if not found_matching_cert:
+                errors.append(f"在文件 {os.path.basename(excel_file)} 中未找到证件号 {middle_row.cert_id}")
         
         # 完整性校验
         middle_cert_ids = set(row.cert_id for row in middle_table if row.match_word)
@@ -457,7 +459,7 @@ class ExcelWriter:
                     ws.cell(row_idx, header_cols['证券品种']).value = '资产管理产品'
                     ws.cell(row_idx, header_cols['市场']).value = '场外'
                     
-                    # 设置格式为文本
+                    # 设置格��为文本
                     for header in header_names:
                         ws.cell(row_idx, header_cols[header]).number_format = '@'
                     
@@ -517,7 +519,15 @@ def process_valuation_data(excel_folder: str,
                           valuation_date,
                           progress_callback=None,
                           log_callback=None) -> bool:
-    """主处理函数"""
+    """主处理函数
+    
+    Args:
+        excel_folder: Excel文件夹路径
+        query_date: 行情日期，格式为YYYYMMDD的字符串（如"20260527"）
+        valuation_date: 估值表日期对象
+        progress_callback: 进度回调函数
+        log_callback: 日志回调函数
+    """
     
     try:
         # 获取脚本所在目录
@@ -537,24 +547,23 @@ def process_valuation_data(excel_folder: str,
         middle_table = ExcelReader.read_middle_table(middle_table_path)
         
         if not middle_table:
-            error_msg = "中间表为空"
+            error_msg = "中间表为空或全是NA"
             if log_callback:
                 log_callback(error_msg, "error")
             logger.error(error_msg)
             return False
         
         if log_callback:
-            log_callback(f"成功读取中间表，共 {len(middle_table)} 行数据", "success")
+            log_callback(f"成功读取中间表，共 {len(middle_table)} 行有效数据", "success")
         
-        # 获取日期格式
-        date_formats = DateFormatter.format_date(valuation_date)
-        query_date_yyyymmdd = DateFormatter.get_yyyymmdd(query_date)
+        # 获取当前日期用于文件命名
+        today_yyyymmdd = datetime.now().strftime('%Y%m%d')
         
         # 匹配并处理估值数据
         if log_callback:
             log_callback("正在匹配估值表...", "info")
         valuation_data, errors = DataProcessor.match_valuation_data(
-            middle_table, excel_folder, date_formats, progress_callback
+            middle_table, excel_folder, progress_callback
         )
         
         # 输出错误信息
@@ -591,10 +600,11 @@ def process_valuation_data(excel_folder: str,
         # 旧版本模板
         old_template = os.path.join(script_dir, '手工行情导入模板20251124.xlsx')
         if os.path.exists(old_template):
-            old_output = os.path.join(script_dir, f'手工行情导入模板{query_date_yyyymmdd}.xlsx')
+            old_output = os.path.join(script_dir, f'手工行情导入模板{today_yyyymmdd}.xlsx')
             if log_callback:
                 log_callback(f"正在写入旧版本模板...", "info")
-            success = ExcelWriter.write_to_template_old(old_template, old_output, valuation_data, query_date_yyyymmdd)
+            # 直接使用query_date（已是YYYYMMDD格式的字符串）
+            success = ExcelWriter.write_to_template_old(old_template, old_output, valuation_data, query_date)
             if success and log_callback:
                 log_callback(f"✅ 旧版本模板写入成功: {os.path.basename(old_output)}", "success")
         else:
@@ -604,10 +614,11 @@ def process_valuation_data(excel_folder: str,
         # 新版本模板
         new_template = os.path.join(script_dir, '手工行情导入模板5月1日后新版本.xlsx')
         if os.path.exists(new_template):
-            new_output = os.path.join(script_dir, f'【新版本】手工行情导入模板{query_date_yyyymmdd}.xlsx')
+            new_output = os.path.join(script_dir, f'【新版本】手工行情导入模板{today_yyyymmdd}.xlsx')
             if log_callback:
                 log_callback(f"正在写入新版本模板...", "info")
-            success = ExcelWriter.write_to_template_new(new_template, new_output, valuation_data, query_date_yyyymmdd)
+            # 直接使用query_date（已是YYYYMMDD格式的字符串）
+            success = ExcelWriter.write_to_template_new(new_template, new_output, valuation_data, query_date)
             if success and log_callback:
                 log_callback(f"✅ 新版本模板写入成功: {os.path.basename(new_output)}", "success")
         else:
@@ -632,7 +643,7 @@ class ValuationGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("虚拟净值提取系统")
-        self.root.geometry("1000x800")
+        self.root.geometry("700x650")
         
         self.excel_folder = tk.StringVar()
         self.query_date = tk.StringVar()
@@ -644,66 +655,66 @@ class ValuationGUI:
         """创建UI组件"""
         
         # 顶部标题
-        title_label = tk.Label(self.root, text="虚拟净值数据提取系统", font=("Arial", 16, "bold"))
-        title_label.pack(pady=10)
+        title_label = tk.Label(self.root, text="虚拟净值数据提取系统", font=("微软雅黑", 14, "bold"))
+        title_label.pack(pady=8)
         
         # 第一行：Excel文件夹选择
         folder_frame = tk.Frame(self.root)
-        folder_frame.pack(padx=10, pady=5, fill=tk.X)
+        folder_frame.pack(padx=10, pady=3, fill=tk.X)
         
-        tk.Label(folder_frame, text="Excel文件夹:", font=("Arial", 10)).pack(side=tk.LEFT)
-        tk.Entry(folder_frame, textvariable=self.excel_folder, width=50, state='readonly').pack(side=tk.LEFT, padx=5)
-        tk.Button(folder_frame, text="浏览...", command=self._select_folder).pack(side=tk.LEFT)
+        tk.Label(folder_frame, text="Excel文件夹:", font=("微软雅黑", 9)).pack(side=tk.LEFT)
+        tk.Entry(folder_frame, textvariable=self.excel_folder, width=40, state='readonly', font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=5)
+        tk.Button(folder_frame, text="浏览", command=self._select_folder, font=("微软雅黑", 9), width=8).pack(side=tk.LEFT)
         
         # 第二行：行情日期选择
         date_frame = tk.Frame(self.root)
-        date_frame.pack(padx=10, pady=5, fill=tk.X)
+        date_frame.pack(padx=10, pady=3, fill=tk.X)
         
-        tk.Label(date_frame, text="行情日期(YYYYMMDD):", font=("Arial", 10)).pack(side=tk.LEFT)
-        tk.Entry(date_frame, textvariable=self.query_date, width=20).pack(side=tk.LEFT, padx=5)
-        tk.Button(date_frame, text="帮助", command=self._help_date_format).pack(side=tk.LEFT)
+        tk.Label(date_frame, text="行情日期:", font=("微软雅黑", 9)).pack(side=tk.LEFT)
+        tk.Entry(date_frame, textvariable=self.query_date, width=20, font=("微软雅黑", 9)).pack(side=tk.LEFT, padx=5)
+        tk.Label(date_frame, text="(YYYYMMDD)", font=("微软雅黑", 8), fg="gray").pack(side=tk.LEFT)
         
         # 第三行：估值表时间选择
         valuation_frame = tk.Frame(self.root)
-        valuation_frame.pack(padx=10, pady=5, fill=tk.X)
+        valuation_frame.pack(padx=10, pady=3, fill=tk.X)
         
-        tk.Label(valuation_frame, text="估值表时间:", font=("Arial", 10)).pack(side=tk.LEFT)
-        self.valuation_date_label = tk.Label(valuation_frame, text="未选择", font=("Arial", 10), fg="red")
+        tk.Label(valuation_frame, text="估值表时间:", font=("微软雅黑", 9)).pack(side=tk.LEFT)
+        self.valuation_date_label = tk.Label(valuation_frame, text="未选择", font=("微软雅黑", 9), fg="red")
         self.valuation_date_label.pack(side=tk.LEFT, padx=5)
-        tk.Button(valuation_frame, text="选择日期...", command=self._select_valuation_date).pack(side=tk.LEFT)
+        tk.Button(valuation_frame, text="选择日期", command=self._select_valuation_date, font=("微软雅黑", 9), width=8).pack(side=tk.LEFT)
         
         # 进度条
         progress_frame = tk.Frame(self.root)
-        progress_frame.pack(padx=10, pady=10, fill=tk.X)
+        progress_frame.pack(padx=10, pady=5, fill=tk.X)
         
-        tk.Label(progress_frame, text="处理进度:", font=("Arial", 10)).pack(side=tk.LEFT)
-        self.progress_label = tk.Label(progress_frame, text="0/0", font=("Arial", 10))
+        tk.Label(progress_frame, text="处理进度:", font=("微软雅黑", 9)).pack(side=tk.LEFT)
+        self.progress_label = tk.Label(progress_frame, text="0/0", font=("微软雅黑", 9))
         self.progress_label.pack(side=tk.LEFT, padx=5)
         
-        self.progress = tk.Canvas(progress_frame, height=20, bg='white', relief=tk.SUNKEN, bd=1)
+        self.progress = tk.Canvas(progress_frame, height=15, bg='white', relief=tk.SUNKEN, bd=1)
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
         # 日志窗口
-        log_frame = tk.LabelFrame(self.root, text="日志", font=("Arial", 10, "bold"))
-        log_frame.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+        log_frame = tk.LabelFrame(self.root, text="处理日志", font=("微软雅黑", 10, "bold"))
+        log_frame.pack(padx=10, pady=8, fill=tk.BOTH, expand=True)
         
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, width=80, font=("Courier", 9))
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=15, width=70, font=("Courier New", 11), fg="black")
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
         # 配置日志文本的标签样式
-        self.log_text.tag_config("error", foreground="red")
-        self.log_text.tag_config("warning", foreground="orange")
-        self.log_text.tag_config("success", foreground="green")
-        self.log_text.tag_config("info", foreground="black")
+        self.log_text.tag_config("error", foreground="red", font=("Courier New", 11, "bold"))
+        self.log_text.tag_config("warning", foreground="#FF8C00", font=("Courier New", 11))
+        self.log_text.tag_config("success", foreground="green", font=("Courier New", 11, "bold"))
+        self.log_text.tag_config("info", foreground="black", font=("Courier New", 11))
         
         # 底部按钮
         button_frame = tk.Frame(self.root)
-        button_frame.pack(padx=10, pady=10, fill=tk.X)
+        button_frame.pack(padx=10, pady=8, fill=tk.X)
         
         tk.Button(button_frame, text="开始处理", command=self._start_process, 
-                 bg="green", fg="white", font=("Arial", 11, "bold"), width=15).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="清空日志", command=self._clear_log, width=15).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame, text="退出", command=self.root.quit, width=15).pack(side=tk.RIGHT, padx=5)
+                 bg="green", fg="white", font=("微软雅黑", 10, "bold"), width=12).pack(side=tk.LEFT, padx=3)
+        tk.Button(button_frame, text="清空日志", command=self._clear_log, font=("微软雅黑", 10), width=12).pack(side=tk.LEFT, padx=3)
+        tk.Button(button_frame, text="退出", command=self.root.quit, font=("微软雅黑", 10), width=12).pack(side=tk.RIGHT, padx=3)
     
     def _select_folder(self):
         """选择Excel文件夹"""
@@ -717,7 +728,7 @@ class ValuationGUI:
         # 创建日期选择窗口
         date_window = tk.Toplevel(self.root)
         date_window.title("选择估值表日期")
-        date_window.geometry("400x350")
+        date_window.geometry("350x320")
         
         cal = Calendar(date_window, selectmode='day')
         cal.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
@@ -729,7 +740,7 @@ class ValuationGUI:
             # 显示多种格式
             date_formats = DateFormatter.format_date(self.valuation_date)
             self.valuation_date_label.config(
-                text=f"{date_formats[0]} | {date_formats[1]} | {date_formats[2]} | {date_formats[3]}",
+                text=f"{date_formats[0]}",
                 fg="green"
             )
             
@@ -737,13 +748,7 @@ class ValuationGUI:
             date_window.destroy()
         
         tk.Button(date_window, text="确认", command=confirm_date, 
-                 bg="blue", fg="white", font=("Arial", 11)).pack(pady=10)
-    
-    def _help_date_format(self):
-        """帮助信息"""
-        messagebox.showinfo("日期格式说明", 
-                          "请输入YYYYMMDD格式的日期，例如：20251124\n\n"
-                          "其中：\nYYYY - 年份（4位数字）\nMM - 月份���2位数字）\nDD - 日期（2位数字）")
+                 bg="blue", fg="white", font=("微软雅黑", 10)).pack(pady=8)
     
     def _log(self, message, tag="info"):
         """写入日志"""
@@ -810,7 +815,7 @@ class ValuationGUI:
         try:
             result = process_valuation_data(
                 self.excel_folder.get(),
-                self.query_date.get(),
+                self.query_date.get(),  # 直接传递YYYYMMDD格式的字符串
                 self.valuation_date,
                 progress_callback=self._update_progress,
                 log_callback=self._log
